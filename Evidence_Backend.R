@@ -139,7 +139,7 @@ reliefweb_list <- c(content(reliefweb_raw_2021)$data,
                     content(reliefweb_raw_2019)$data,
                     content(reliefweb_raw_2018)$data,
                     content(reliefweb_raw_2017)$data)
-rm(test)
+
 
 # Now let's build our dataframe.
 reliefweb_df <- bind_rows(lapply(reliefweb_list, as.data.frame)) %>%
@@ -292,6 +292,10 @@ combined_data <- rbind(evidence, reliefweb_df) %>%
   arrange(Country, Category)
 
 
+
+# NEXT ----
+# Next steps:
+#   1) Ensure correct matching of adm0_names
 
 test <- anti_join(combined_data, geography, by = c("Country" = "adm0_name"))
 test2 <- anti_join(reliefweb_df, geography, by = c("Country" = "adm0_name"))
