@@ -14,6 +14,10 @@ library(sf)
 
 # 1. Manual Evidence Database ----
 
+# First let's read in a corporate shapefile which has all subnational boundaries
+#   down to administrative level 2 (we use these to then build our maps later)
+geography <- read_sf("C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\\Documents (OneDrive)\\Data\\rbb_adm2_may_2021\\adm2.shp")
+
 # First we load our manually-input master database of evidence products,
 #   which dates back to 2017. Importantly, we need to pivot the subnational
 #   level tags into long data, as it's currently comma separated within 
@@ -24,8 +28,16 @@ evidence <- read_excel('C:\\Users\\clinton.tedja\\World Food Programme\\Regional
 
 # First we gotta do a pivot to allow for tidier long format of coverage at subnational
 #   levels which are manually comma separated in the original database
-nmax <- max(str_count(evidence$Coverage, "\\,"))
+evidence <- evidence %>% 
+  mutate(Coverage = case_when(Coverage == "Asia-Pacific" ~ paste0(unique(geography$adm0_name), collapse = ", "),
+                              Coverage == "South Asia" ~ "India, Sri Lanka, Bangladesh, Pakistan",
+                              TRUE ~ Coverage)) %>%
+  mutate(Coverage = case_when(Country == "Asia-Pacific" ~ paste0(unique(geography$adm0_name), collapse = ", "),
+                              Country == "South Asia" ~ "India, Sri Lanka, Bangladesh, Pakistan",
+                              TRUE ~ Coverage))
 
+
+nmax <- max(str_count(evidence$Coverage, "\\,"))
 
 evidence <- separate(data = evidence, col = Coverage, 
                   into = paste0("c", seq_len(nmax)),
@@ -56,16 +68,16 @@ evidence <- evidence %>% pivot_longer(cols = paste0("c", seq_len(nmax)),
   select(-c(Country_N)) %>%
   mutate(Country = str_trim(Country))
 
-
+# And a little formula to get rid of any superfluously pivoted rows
+evidence <- filter(evidence, !((Coverage %in% unique(geography$adm0_name) |
+                                  Coverage == "Indonesia") &
+                        Coverage != Country))
 
 
 
 #
 #
 #
-#
-#
-
 
 
 # 2. ReliefWeb API ----
@@ -150,7 +162,7 @@ reliefweb_list <- c(content(reliefweb_raw_2021)$data,
 
 
 # Now let's build our dataframe.
-reliefweb_df <- bind_rows(lapply(reliefweb_list, as.data.frame))%>%
+reliefweb_df <- bind_rows(lapply(reliefweb_list, as.data.frame)) %>%
   select(c(fields.date.created,
            fields.primary_country.name,
            fields.format.name,
@@ -160,7 +172,7 @@ reliefweb_df <- bind_rows(lapply(reliefweb_list, as.data.frame))%>%
            fields.file.url,
            fields.body,
            fields.url_alias,
-           fields.file.preview.url.small)) %>%
+           fields.file.preview.url.thumb)) %>%
   mutate(fields.date.created = as.Date(fields.date.created, 
                                           format = "%Y-%m-%d", 
                                           tz = "UTC")) %>%
@@ -174,7 +186,7 @@ reliefweb_df <- bind_rows(lapply(reliefweb_list, as.data.frame))%>%
          Author = fields.source.shortname,
          Summary = fields.body,
          Origin_Link = fields.origin,
-         Image = fields.file.preview.url.small) %>%
+         Image = fields.file.preview.url.thumb) %>%
   # Then we want to make sure the categories match our manual database.
   mutate(Category = case_when(Category == "Map" ~ "Dashboards/Maps/Infographics",
                               Category == "Infographic" ~ "Dashboards/Maps/Infographics",
@@ -229,20 +241,10 @@ unique(reliefweb_df$Country)
 #
 
 
-
-
 # 3. Subnational Allocation ----
 
 # Now we're searching within the body summaries of our API-pulled text
 #   to automate any mentions of subnational data.
-
-
-# First let's read in a corporate shapefile which has all subnational boundaries
-#   down to administrative level 2 (we use these to then build our maps later)
-geography <- read_sf("C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\\Documents (OneDrive)\\Data\\rbb_adm2_may_2021\\adm2.shp")
-
-
-
 
 # The following function does the work of automating the
 #   allocation of subnational level data for each item. This is coded with the
@@ -258,7 +260,7 @@ geography <- read_sf("C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\
 #   dataset and subsequently bind these into a dataframe.
 reliefweb_df <- map_df(seq(nrow(reliefweb_df)), function(x) {
   # The function applies a logical T/F vector for all rows in our df;
-  #   here it's checking if any admin names exist within our titles or summaries
+  #   here it's checking if any admin names exist within our titles
   matches <- (str_detect(
         reliefweb_df$Title[x],
         (filter(geography, adm0_name == reliefweb_df$Country[x]))$adm1_name) | 
@@ -277,14 +279,10 @@ reliefweb_df <- map_df(seq(nrow(reliefweb_df)), function(x) {
 #   and which don't actually have any subnational level items.
 #   We can manually review using the following:
 #     sort(table((filter(admin_matching, Locations != Country))$Locations), decreasing = TRUE)[1:100]
-  filter(!Coverage %in% c("Ba", "Reg")) 
-
-reliefweb_df$Coverage
+  filter(!Coverage %in% c("Ba", "Reg", "La")) 
 
 
 
-#
-#
 #
 #
 #
@@ -314,14 +312,8 @@ combined_data <- rbind(evidence, reliefweb_df) %>%
 
 # Tests and Export ----
 test <- anti_join(combined_data, geography, by = c("Country" = "adm0_name"))
-test2 <- anti_join(reliefweb_df, geography, by = c("Country" = "adm0_name"))
-test3 <- anti_join(evidence, geography, by = c("Country" = "adm0_name"))
-
 unique(test$Country)
-unique(test2$Country)
-unique(test3$Country)
-unique(geography$adm0_name)
-
+rm(test)
 
 plot_data <- combined_data %>% filter(grepl("WFP", Author)) %>%
   distinct(Title, .keep_all = TRUE)
@@ -330,7 +322,16 @@ ggplot(plot_data, aes(x = Date, fill = Source)) +
   geom_histogram(binwidth = 180)
 
 
-# Now I'm adding this to the original excel sheet on our Sharepoint
+# Now we'll add it to a OneDrive location that will allow
+#   for immediate syncing 
+write.xlsx(as.data.frame(filter(combined_data, Category != "External assessments")), 
+           sheetName = "Combined_Reports",
+           showNA = FALSE,
+           row.names = FALSE,
+           'C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\\Documents (OneDrive)\\Data\\Evidence_Backend\\Evidence_Mapping.xlsx')
+
+
+# And also appending it to the original excel sheet on our Sharepoint
 #   though you'll want to double check that this sheet isn't already there.
 write.xlsx(as.data.frame(combined_data), 
            sheetName = "ReliefWeb_Merged_API", 
@@ -340,27 +341,8 @@ write.xlsx(as.data.frame(combined_data),
            'C:\\Users\\clinton.tedja\\World Food Programme\\Regional Bureau Bangkok - Programme\\Programme cycle, Reports & KM\\Knowledge Management\\CSP Evidence Master List.xlsx')
 
 
-sample_n(combined_data, 20)
-unique(combined_data$Country)
-
-sample_n(filter(combined_data, Source == "ReliefWeb API"), 20)
-# As well as adding it to a OneDrive location that will allow
-#   for immediate syncing 
-write.xlsx(as.data.frame(combined_data), 
-           sheetName = "Combined_Reports",
-           showNA = FALSE,
-           row.names = FALSE,
-           'C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\\Documents (OneDrive)\\Data\\Evidence_Backend\\Evidence_Mapping.xlsx')
-
 
 # fin
-
-
-
-
-
-
-
 
 
 
