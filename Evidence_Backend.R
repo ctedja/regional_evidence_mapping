@@ -24,10 +24,17 @@ evidence <- read_excel('C:\\Users\\clinton.tedja\\World Food Programme\\Regional
 
 # Pivot to allow for tidier long format of coverage at subnational levels which are manually comma separated in the original database
 evidence <- evidence %>% 
-  mutate(Coverage = case_when(Coverage == "Asia-Pacific" ~ "Regional",
+  # Tag regional first in a separate column; we need to have this identification in our country/coverage disaggregated data later to identify which are regional products
+  mutate(Coverage_Regional = case_when(Coverage == "Asia-Pacific" ~ "Regional",
+                                TRUE ~ "Specific"),
+         #  Split out for areas of interest
+         Coverage = case_when(Coverage == "Asia-Pacific" ~ paste0(unique(geography$adm0_name), collapse = ", "),
                               Coverage == "South Asia" ~ "India, Sri Lanka, Bangladesh, Pakistan",
                               TRUE ~ Coverage)) %>%
-  mutate(Country = case_when(Country == "Asia-Pacific" ~ "Regional",
+  # Do the same for countries
+  mutate(Country_Regional = case_when(Country == "Asia-Pacific" ~ "Regional",
+                                TRUE ~ "Specific"),
+         Country = case_when(Country == "Asia-Pacific" ~ paste0(unique(geography$adm0_name), collapse = ", "),
                               Country == "South Asia" ~ "India, Sri Lanka, Bangladesh, Pakistan",
                               TRUE ~ Country))
 
@@ -195,10 +202,13 @@ reliefweb_df <- bind_rows(lapply(reliefweb_list, as.data.frame)) %>%
                               grepl("price", Title, ignore.case = TRUE) ~ "Market/Price Monitoring",
                               grepl("annual country report", Title, ignore.case = TRUE) ~ "Annual Country Report",
                               TRUE ~ Category)) %>%
+  # Add some columns to match the manual database
   mutate(Sharing = "Public", 
          Recommendations = NA, 
-         Source = "ReliefWeb API") %>%
-  # And that any abberations in country names match our spatial file later
+         Source = "ReliefWeb API",
+         Coverage_Regional = "Specific",
+         Country_Regional = "Specific") %>%
+  # Ensure any abberations in country names match our spatial file later
   mutate(Country = case_when(
     Country == "Lao People's Democratic Republic (the)" ~ "Lao People's Democratic Republic",
     Country == "American Samoa" ~ "Samoa",
@@ -275,9 +285,14 @@ combined_data <- rbind(evidence, reliefweb_df) %>%
   # But we also need to consolidate the links so that there's only one, preferably giving priority to Origin_Link which provides us with any of the original non-ReliefWeb links.
   mutate(Link = ifelse(is.na(Origin_Link), 
                        ifelse(is.na(Link), Alt_Link, Link), 
-                       Origin_Link)) %>%
+                       Origin_Link),
+         Coverage_Regional = case_when(Coverage_Regional == "Specific" ~ Coverage,
+                                       TRUE ~ "Regional"),
+         Country_Regional = case_when(Country_Regional == "Specific" ~ Country,
+                                      TRUE ~ "Regional")) %>%
   select(-c("Alt_Link", "Origin_Link")) %>%
   arrange(Country, Category)
+
 
 
 #
@@ -288,7 +303,6 @@ combined_data <- rbind(evidence, reliefweb_df) %>%
 
 # 5. Tests and Export ----
 test <- anti_join(combined_data, geography, by = c("Country" = "adm0_name"))
-
 rm(test)
 
 plot_data <- combined_data %>% filter(grepl("WFP", Author)) %>%
