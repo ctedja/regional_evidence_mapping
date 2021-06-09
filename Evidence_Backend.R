@@ -14,30 +14,25 @@ library(sf)
 
 # 1. Manual Evidence Database ----
 
-# First let's read in a corporate shapefile which has all subnational boundaries
-#   down to administrative level 2 (we use these to then build our maps later)
+# First let's read in a corporate shapefile which has all subnational boundaries down to administrative level 2 (we use these to then build our maps later)
 geography <- read_sf("C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\\Documents (OneDrive)\\Data\\rbb_adm2_may_2021\\adm2.shp")
 
-# First we load our manually-input master database of evidence products,
-#   which dates back to 2017. Importantly, we need to pivot the subnational
-#   level tags into long data, as it's currently comma separated within 
-#   singular cells.
 
+# Load our manually-input master database of evidence products, which dates back to 2017. Importantly, we need to pivot the subnational level tags into long data, as it's currently comma separated within singular cells.
 evidence <- read_excel('C:\\Users\\clinton.tedja\\World Food Programme\\Regional Bureau Bangkok - Programme\\Programme cycle, Reports & KM\\Knowledge Management\\CSP Evidence Master List.xlsx', sheet = 'Evidence', skip = 3)
 
 
-# First we gotta do a pivot to allow for tidier long format of coverage at subnational
-#   levels which are manually comma separated in the original database
+# Pivot to allow for tidier long format of coverage at subnational levels which are manually comma separated in the original database
 evidence <- evidence %>% 
-  mutate(Coverage = case_when(Coverage == "Asia-Pacific" ~ paste0(unique(geography$adm0_name), collapse = ", "),
+  mutate(Coverage = case_when(Coverage == "Asia-Pacific" ~ "Regional",
                               Coverage == "South Asia" ~ "India, Sri Lanka, Bangladesh, Pakistan",
                               TRUE ~ Coverage)) %>%
-  mutate(Coverage = case_when(Country == "Asia-Pacific" ~ paste0(unique(geography$adm0_name), collapse = ", "),
+  mutate(Country = case_when(Country == "Asia-Pacific" ~ "Regional",
                               Country == "South Asia" ~ "India, Sri Lanka, Bangladesh, Pakistan",
-                              TRUE ~ Coverage))
+                              TRUE ~ Country))
 
 
-nmax <- max(str_count(evidence$Coverage, "\\,"))
+nmax <- max(str_count(evidence$Coverage, "\\,"))+1
 
 evidence <- separate(data = evidence, col = Coverage, 
                   into = paste0("c", seq_len(nmax)),
@@ -48,14 +43,14 @@ evidence <- evidence %>% pivot_longer(cols = paste0("c", seq_len(nmax)),
                       names_to = "Coverage_N",
                       values_to = "Coverage",
                       values_drop_na = TRUE) %>%
+  # We also are needing to make it match our API data source
   select(-c(Coverage_N, Index, Theme, Source)) %>%
   mutate(Date = as.Date(as.numeric(Date), origin = "1899-12-30")) %>%
   mutate(Source = "Manual Entry", Origin_Link = NA, Image = NA) %>%
   mutate(Coverage = str_trim(Coverage, side = c("left"))) 
 
-# Then we gotta repeat that pivot for any places where country titles
-#   were comma separated in the same way
-nmax <- max(str_count(evidence$Country, "\\,"))
+# Then we gotta repeat that pivot for any places where country titles were comma separated in the same way
+nmax <- max(str_count(evidence$Country, "\\,"))+1
 
 evidence <- separate(data = evidence, col = Country, 
                      into = paste0("c", seq_len(nmax)),
@@ -68,9 +63,11 @@ evidence <- evidence %>% pivot_longer(cols = paste0("c", seq_len(nmax)),
   select(-c(Country_N)) %>%
   mutate(Country = str_trim(Country))
 
+
+
 # And a little formula to get rid of any superfluously pivoted rows
 evidence <- filter(evidence, !((Coverage %in% unique(geography$adm0_name) |
-                                  Coverage == "Indonesia") &
+                                  Coverage == "Regional") &
                         Coverage != Country))
 
 
@@ -84,8 +81,7 @@ evidence <- filter(evidence, !((Coverage %in% unique(geography$adm0_name) |
 
 # Using the API from ReliefWeb, we can also expand the scope of our search substantially
 
-# First let's define the countries of interest
-#   and produce a URL call that is easier to read.
+# First let's define the countries of interest and produce a URL call that is easier to read.
 
 api_country_query <- c("Afghanistan",
           "Bangladesh",
@@ -145,8 +141,7 @@ api_url_2017 <- paste0("https://api.reliefweb.int/v1/reports?appname=apidoc&prof
 
 
 
-# Now we load the APIs here.
-#   We have to build multiple because the limit for this API is 1,000.
+# Now we load the APIs here.We have to build multiple because the limit for this API is 1,000.
 reliefweb_raw_2021 <- GET(api_url_2021)
 reliefweb_raw_2020 <- GET(api_url_2020)
 reliefweb_raw_2019 <- GET(api_url_2019)
@@ -208,8 +203,7 @@ reliefweb_df <- bind_rows(lapply(reliefweb_list, as.data.frame)) %>%
     Country == "Lao People's Democratic Republic (the)" ~ "Lao People's Democratic Republic",
     Country == "American Samoa" ~ "Samoa",
     TRUE ~ Country)) %>%
-  # And these country briefs appear to have been picked up so 
-  #   intermittently by ReliefWeb so we'll leave it for now.
+  # And these country briefs appear to have been picked up so intermittently by ReliefWeb so we'll leave it for now.
   filter(!grepl("country brief", Title, ignore.case = TRUE)) %>%
   # And we want to also get rid of all the superfluous asterisks, for consistency.
   mutate(Summary = gsub("\\*", "", Summary)) 
@@ -243,24 +237,13 @@ unique(reliefweb_df$Country)
 
 # 3. Subnational Allocation ----
 
-# Now we're searching within the body summaries of our API-pulled text
-#   to automate any mentions of subnational data.
+# Now we're searching within the body summaries of our API-pulled text to automate any mentions of subnational data.
 
-# The following function does the work of automating the
-#   allocation of subnational level data for each item. This is coded with the
-#   assumption that any mention of administrative levels for the primary country
-#   within the summary means that the item indeed has a subnational focus there.
-#   This logic seems to check out for a few samples tested. 
-# Commonly the summaries only mention admin_1 level data, and I've accordingly
-#   applied all corresponding adm_2 locations to these. However, the exceptional
-#   issue is when a text might mention: 'Ghotki, in Sindh Province', and the
-#   code then assumes application of everything from the broader adm_1 level.
+# The following function does the work of automating the allocation of subnational level data for each item. This is coded with the  assumption that any mention of administrative levels for the primary country within the title means that the item indeed has a subnational focus there. This logic seems to check out for the samples tested. 
 
-# First, we use map_df to apply a function to every single row in our
-#   dataset and subsequently bind these into a dataframe.
+# First, we use map_df to apply a function to every single row in our dataset and subsequently bind these into a dataframe.
 reliefweb_df <- map_df(seq(nrow(reliefweb_df)), function(x) {
-  # The function applies a logical T/F vector for all rows in our df;
-  #   here it's checking if any admin names exist within our titles
+  # The function applies a logical T/F vector for all rows in our df; here it's checking if any admin names exist within our titles
   matches <- (str_detect(
         reliefweb_df$Title[x],
         (filter(geography, adm0_name == reliefweb_df$Country[x]))$adm1_name) | 
@@ -273,12 +256,7 @@ reliefweb_df <- map_df(seq(nrow(reliefweb_df)), function(x) {
     tibble(reliefweb_df[x, ], 
            Coverage = (filter(geography, adm0_name == reliefweb_df$Country[x]))$adm2_name[matches])
   else tibble(reliefweb_df[x, ], Coverage = Country)}) %>%
-# Then, we have to filter out a few select subnational level
-#   locations, that were picked up simply because they are common in English words,
-#   ... a town called "Ba" in Fiji, and a district called "Reg" in Afghanistan,
-#   and which don't actually have any subnational level items.
-#   We can manually review using the following:
-#     sort(table((filter(admin_matching, Locations != Country))$Locations), decreasing = TRUE)[1:100]
+# Then, we have to filter out a few select subnational level locations, that were picked up simply because they are common in English words, such as a town called "Ba" in Fiji, and a district called "Reg" in Afghanistan,and which don't actually have any subnational level items. We can manually review using the following: sort(table((filter(admin_matching, Locations != Country))$Locations), decreasing = TRUE)[1:100]
   filter(!Coverage %in% c("Ba", "Reg", "La")) 
 
 
@@ -294,9 +272,7 @@ reliefweb_df <- map_df(seq(nrow(reliefweb_df)), function(x) {
 all_equal(evidence, reliefweb_df)
 
 combined_data <- rbind(evidence, reliefweb_df) %>%
-  # But we also need to consolidate the links so that there's only one, preferably
-  # giving priority to Origin_Link which provides us with any of the original
-  # non-ReliefWeb links.
+  # But we also need to consolidate the links so that there's only one, preferably giving priority to Origin_Link which provides us with any of the original non-ReliefWeb links.
   mutate(Link = ifelse(is.na(Origin_Link), 
                        ifelse(is.na(Link), Alt_Link, Link), 
                        Origin_Link)) %>%
@@ -310,9 +286,9 @@ combined_data <- rbind(evidence, reliefweb_df) %>%
 
 
 
-# Tests and Export ----
+# 5. Tests and Export ----
 test <- anti_join(combined_data, geography, by = c("Country" = "adm0_name"))
-unique(test$Country)
+
 rm(test)
 
 plot_data <- combined_data %>% filter(grepl("WFP", Author)) %>%
@@ -322,18 +298,17 @@ ggplot(plot_data, aes(x = Date, fill = Source)) +
   geom_histogram(binwidth = 180)
 
 
-# Now we'll add it to a OneDrive location that will allow
-#   for immediate syncing 
-write.xlsx(as.data.frame(filter(combined_data, Category != "External assessments")), 
+# Now we'll add it to a OneDrive location that will allow for immediate syncing with our Tableau dashboard
+write.xlsx(as.data.frame(filter(combined_data, Category != "External assessments" &
+                                  Category != "External Assessments")), 
            sheetName = "Combined_Reports",
            showNA = FALSE,
            row.names = FALSE,
            'C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\\Documents (OneDrive)\\Data\\Evidence_Backend\\Evidence_Mapping.xlsx')
 
 
-# And also appending it to the original excel sheet on our Sharepoint
-#   though you'll want to double check that this sheet isn't already there.
-write.xlsx(as.data.frame(combined_data), 
+# And also appending it to the original excel sheet on our Sharepoint though you'll want to double check that this sheet isn't already there.
+write.xlsx(as.data.frame(plot_data), 
            sheetName = "ReliefWeb_Merged_API", 
            append = TRUE, 
            showNA = FALSE,
@@ -342,11 +317,23 @@ write.xlsx(as.data.frame(combined_data),
 
 
 
+# And this list of adm2_level locations will help colleagues to crosscheck against their manual entry matches
+geography_reference <- geography %>% 
+  as.data.frame() %>%
+  select(c(objectid, iso3, adm0_id, adm0_name, adm1_name, adm1_id, adm2_name, adm2_altnm, adm2_id)) %>%
+  arrange(adm0_name, adm1_name, adm2_name)
+
+
+write.xlsx(geography_reference, 
+           sheetName = "geography_reference",
+           showNA = FALSE,
+           row.names = FALSE,
+           append = TRUE,
+           "C:\\Users\\clinton.tedja\\OneDrive - World Food Programme\\Documents (OneDrive)\\Data\\Admin Boundaries RBB.xlsx")
+
+
+
 # fin
-
-
-
-
 
 
 
